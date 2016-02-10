@@ -1,4 +1,4 @@
--- Copyright 2011-14 Paul Kulchenko, ZeroBrane LLC
+-- Copyright 2011-15 Paul Kulchenko, ZeroBrane LLC
 ---------------------------------------------------------
 
 local ide = ide
@@ -32,7 +32,7 @@ local helpMenu = wx.wxMenu{
 -- do not translate Help menu on Mac as it won't merge with "standard" menus
 menuBar:Append(helpMenu, ide.osname == 'Macintosh' and "&Help" or TR("&Help"))
 
-local function DisplayAbout(event)
+local function displayAbout(event)
   local logo = ide:GetAppName().."/"..GetIDEString("logo")
   local logoimg = wx.wxFileName(logo):FileExists() and
     ([[<tr><td><img src="%s"></td></tr>]]):format(logo) or ""
@@ -46,7 +46,7 @@ local function DisplayAbout(event)
 	  <tr>
 		<td>
 		<b>ZeroBrane Studio (%s; MobDebug %s)</b><br>
-		<b>Copyright &copy; 2011-2014 ZeroBrane LLC</b><br>
+		<b>Copyright &copy; 2011-2015 ZeroBrane LLC</b><br>
 		Paul Kulchenko<br>
 		Licensed under the MIT License.
 		</td>
@@ -62,7 +62,7 @@ local function DisplayAbout(event)
 	  </tr>
 	  <tr>
 		<td>
-		<b>Based on wxLua editor (%s)</b><br>
+		<b>Based on wxLua editor</b><br>
 		<b>Copyright &copy; 2002-2005 Lomtick Software</b><br>
 		J. Winwood, John Labenski<br>
 		Licensed under wxWindows Library License, v3.
@@ -70,7 +70,7 @@ local function DisplayAbout(event)
 	  </tr>
 	  <tr>
 		<td>
-                <b>Built with %s</b>
+                <b>Built with %s, %s</b>
 		</td>
 	  </tr>
 	</table>
@@ -78,7 +78,7 @@ local function DisplayAbout(event)
       </body>
     </html>]])
   :format(logoimg, ide.VERSION, mobdebug._VERSION, ide:GetAppName(),
-    wxlua.wxLUA_VERSION_STRING, wx.wxVERSION_STRING)
+    wx.wxVERSION_STRING, wxlua.wxLUA_VERSION_STRING)
 
   local dlg = wx.wxDialog(frame, wx.wxID_ANY, TR("About %s"):format(GetIDEString("editor")))
 
@@ -111,7 +111,7 @@ local function DisplayAbout(event)
   dlg:Destroy()
 end
 
-frame:Connect(ID_ABOUT, wx.wxEVT_COMMAND_MENU_SELECTED, DisplayAbout)
+frame:Connect(ID_ABOUT, wx.wxEVT_COMMAND_MENU_SELECTED, displayAbout)
 for item, page in pairs(urls) do
   frame:Connect(item, wx.wxEVT_COMMAND_MENU_SELECTED,
     function() wx.wxLaunchDefaultBrowser(url..page, 0) end)

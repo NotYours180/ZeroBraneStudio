@@ -8,6 +8,7 @@
 #define _WIN32_WINNT 0x0502
 #endif
 
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winbase.h>
 #include <stdlib.h>
@@ -154,17 +155,11 @@ int main (int argc, char *argv[])
       MB_OK|MB_ICONERROR);
     return 0;
   }
-  if (file!=NULL)
-    *file = 0; // finish the string, I don't need the appname
-  //int i;
-  //for (i=0;i<argc; i++)
-  //		printf("%d %s\n",i,argv[i]);
+  if (file!=NULL) *file = 0; // finish the string, don't need the appname
 
   SetCurrentDirectory(buffer);
 
-
-  SetDllDirectory(".\\bin\\");
-  hinstLib = LoadLibrary("lua51.dll");
+  hinstLib = LoadLibrary(".\\bin\\lua51.dll");
   if (hinstLib != NULL)
   {
     luaL_newstate = (voidfunc*) GetProcAddress(hinstLib, "luaL_newstate");

@@ -1,34 +1,45 @@
--- Copyright 2011-14 Paul Kulchenko, ZeroBrane LLC
+-- Copyright 2011-15 Paul Kulchenko, ZeroBrane LLC
 ---------------------------------------------------------
 
+local unpack = table.unpack or unpack
 local maxlines = 8
 local row_height = 46
-local row_width = 450
-local win = ide.osname == 'Windows'
 
 function CommandBarShow(params)
   local onDone, onUpdate, onItem, onSelection, defaultText, selectedText =
     params.onDone, params.onUpdate, params.onItem, params.onSelection,
     params.defaultText, params.selectedText
+  local row_width = ide.config.commandbar.width or 0
+  if row_width < 1 then
+    row_width = math.max(450, math.floor(row_width * ide:GetMainFrame():GetClientSize():GetWidth()))
+  end
+
   local lines = {}
   local linesnow = #lines
   local linenow = 0
 
-  local ed = ide:GetEditor()
-  local pos = ed and ed:GetScreenPosition() or ide:GetEditorNotebook():GetScreenPosition()
+  local nb = ide:GetEditorNotebook()
+  local pos = nb:GetScreenPosition()
   if pos then
-    pos:SetX(pos:GetX()+ide:GetEditorNotebook():GetClientSize():GetWidth()-row_width-16)
-    pos:SetY(pos:GetY()+2)
-    if not win then pos = ide:GetMainFrame():ScreenToClient(pos) end
+    local miny
+    for p = 0, nb:GetPageCount()-1 do
+      local y = nb:GetPage(p):GetScreenPosition():GetY()
+      -- just in case, compare with the position of the notebook itself;
+      -- this is needed because the tabs that haven't been refreshed yet
+      -- may report 0 as their screen position on Linux, which is incorrect.
+      if y > pos:GetY() and (not miny or y < miny) then miny = y end
+    end
+    pos:SetX(pos:GetX()+nb:GetClientSize():GetWidth()-row_width-16)
+    pos:SetY((miny or pos:GetY())+2)
   else
     pos = wx.wxDefaultPosition
   end
 
-  local frame = win and wx.wxFrame(ide:GetMainFrame(), wx.wxID_ANY, "Command Bar",
+  local frame = wx.wxFrame(ide:GetMainFrame(), wx.wxID_ANY, "Command Bar",
     pos, wx.wxDefaultSize,
-    wx.wxFRAME_TOOL_WINDOW + wx.wxFRAME_FLOAT_ON_PARENT + wx.wxNO_BORDER)
+    wx.wxFRAME_NO_TASKBAR + wx.wxFRAME_FLOAT_ON_PARENT + wx.wxNO_BORDER)
   local panel = wx.wxPanel(frame or ide:GetMainFrame(), wx.wxID_ANY,
-    win and wx.wxDefaultPosition or pos, wx.wxDefaultSize, wx.wxFULL_REPAINT_ON_RESIZE)
+    wx.wxDefaultPosition, wx.wxDefaultSize, wx.wxFULL_REPAINT_ON_RESIZE)
   local search = wx.wxTextCtrl(panel, wx.wxID_ANY, "\1",
     wx.wxDefaultPosition,
     -- make the text control a bit smaller on OSX
@@ -36,8 +47,6 @@ function CommandBarShow(params)
     wx.wxTE_PROCESS_ENTER + wx.wxTE_PROCESS_TAB + wx.wxNO_BORDER)
   local results = wx.wxScrolledWindow(panel, wx.wxID_ANY,
     wx.wxDefaultPosition, wx.wxSize(0, 0))
-
-  if not frame then frame = panel end
 
   local style, styledef = ide.config.styles, StylesGetDefault()
   local textcolor = wx.wxColour(unpack(style.text.fg or styledef.text.fg))
@@ -81,7 +90,7 @@ function CommandBarShow(params)
   -- needed because KILL_FOCUS handler can be called after closing window
   local function onExit(index)
     onExit = function() end
-    onDone(index and lines[index], index ~= nil, search:GetValue())
+    onDone(index and lines[index], index, search:GetValue())
     frame:Close()
   end
 
@@ -198,7 +207,7 @@ function CommandBarShow(params)
         if linenow <= 0 then linenow = 1 end
       end
     elseif keycode == wx.WXK_ESCAPE then
-      onExit()
+      onExit(false)
       return
     else
       event:Skip()
@@ -217,7 +226,9 @@ function CommandBarShow(params)
     onExit(math.floor(y / row_height)+1)
   end
 
+  local takeNearestEdit = false
   local function onIdle(event)
+    if takeNearestEdit then onExit() end
     if linewas == linenow then return end
     linewas = linenow
     if linenow == 0 then return end
@@ -252,9 +263,14 @@ function CommandBarShow(params)
   search:Connect(wx.wxEVT_KEY_DOWN, onKeyDown)
   search:Connect(wx.wxEVT_COMMAND_TEXT_UPDATED, onTextUpdated)
   search:Connect(wx.wxEVT_COMMAND_TEXT_ENTER, function() onExit(linenow) end)
-  search:Connect(wx.wxEVT_KILL_FOCUS, function() onExit() end)
+  -- this could be done with calling `onExit`, but on OSX KILL_FOCUS is called before
+  -- mouse LEFT_DOWN, which closes the panel before the results are taken;
+  -- to avoid this, `onExit` call is delayed and handled in IDLE event
+  search:Connect(wx.wxEVT_KILL_FOCUS, function() takeNearestEdit = true end)
 
   frame:Show(true)
+  frame:Update()
+  frame:Refresh()
 
   search:SetValue((defaultText or "")..(selectedText or ""))
   search:SetSelection(#(defaultText or ""), -1)
@@ -293,7 +309,8 @@ local function score(p, v)
 
   local key = p..'\2'..v
   if not cache[key] then
-    local score = weights.onegram * overlap(p, v, 1)
+    -- ignore all whitespaces in the pattern for one-gram comparison
+    local score = weights.onegram * overlap(p:gsub("%s+",""), v, 1)
     if score > 0 then -- don't bother with those that can't even score 1grams
       p = ' '..(p:gsub(sep, ' '))
       v = ' '..(v:gsub(sep, ' '))
@@ -306,24 +323,39 @@ local function score(p, v)
 end
 
 function CommandBarScoreItems(t, pattern, limit)
-  local r, plen = {}, #pattern
+  local r, plen = {}, #(pattern:gsub("%s+",""))
   local maxp = 0
   local num = 0
-  local prefilter = ide.config.commandbar and ide.config.commandbar.prefilter <= #t
-    and pattern:gsub("[^%w_]+",""):lower():gsub(".", "%1.*"):gsub("%.%*$","")
+  local prefilter = ide.config.commandbar and ide.config.commandbar.prefilter
+  -- anchor for 1-2 symbol patterns to speed up search
+  local needanchor = prefilter and prefilter * 4 <= #t and plen <= 2
+  local filter = prefilter and prefilter <= #t
+    -- expand `abc` into `a.*b.*c`, but limit the prefix to avoid penalty for `s.*s.*s.*....`
+    and pattern:gsub("[^%w_]+",""):sub(1,4):lower():gsub(".", "%1.*"):gsub("%.%*$","")
     or nil
   for _, v in ipairs(t) do
-    if #v >= plen and (not prefilter or v:lower():find(prefilter)) then
-      local p = score(pattern, v)
-      maxp = math.max(p, maxp)
-      if p > 1 and p > maxp / 4 then
-        num = num + 1
-        r[num] = {v, p}
+    if #v >= plen then
+      local match = filter and v:lower():find(filter)
+      -- check if the current name needs to be prefiltered or anchored (for better performance);
+      -- if it needs to be anchored, then anchor it at the beginning of the string or the word
+      if not filter or (match and (not needanchor or match == 1 or v:find("^[%p%s]", match-1))) then
+        local p = score(pattern, v)
+        maxp = math.max(p, maxp)
+        if p > 1 and p > maxp / 4 then
+          num = num + 1
+          r[num] = {v, p}
+        end
       end
     end
   end
   table.sort(r, function(a, b) return a[2] > b[2] end)
-  if limit then r[limit] = nil end -- limit the list to be displayed
+  -- limit the list to be displayed
+  -- `r[limit+1] = nil` is not desired as the resulting table may be sorted incorrectly
+  if tonumber(limit) and limit < #r then
+    local tmp = r
+    r = {}
+    for i = 1, limit do r[i] = tmp[i] end
+  end
   return r
 end
 

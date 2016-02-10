@@ -515,7 +515,7 @@ function M.require_inspect(name, report, spath)
     vinfo = T.error'module not found' --IMPROVE: include search paths?
   end
   M.package_loaded[name] = {vinfo, mast}
-  return vinfo
+  return vinfo, mast
 end
 
 
@@ -703,12 +703,31 @@ function M.infer_values(top_ast, tokenlist, src, report)
       if #iter_ast == 1 and iter_ast[1].tag == 'Call' and iter_ast[1][1].value == ipairs then
         for i, var_ast in ipairs(varlist_ast) do
           if i == 1 then set_value(var_ast, T.number)
-          elseif i == 2 then set_value(var_ast, T.universal)
+          -- handle the type of the value as the type of the first element
+          -- in the table that is a parameter for ipairs
+          elseif i == 2 then
+            local t_ast = iter_ast[1][2]
+            local value = T.universal
+            if (known(t_ast.value) or T.istabletype[t_ast.value]) then
+              local ok; ok, value = pzcall(tindex, {t_ast, {tag='Number', 1}}, t_ast.value, 1)
+              if not ok then value = T.error(t_ast.value) end
+            end
+            set_value(var_ast, value)
           else set_value(var_ast, nil) end
         end
       elseif #iter_ast == 1 and iter_ast[1].tag == 'Call' and iter_ast[1][1].value == pairs then
+        local t_ast = iter_ast[1][2]
+        local value = T.universal
+        local key
+        if t_ast.value and (known(t_ast.value) or T.istabletype[t_ast.value]) then
+          key = next(t_ast.value)
+          local ok; ok, value = pzcall(tindex, {t_ast, {tag='String', key}}, t_ast.value, key)
+          if not ok then value = T.error(t_ast.value) end
+        end
+
         for i, var_ast in ipairs(varlist_ast) do
-          if i <= 2 then set_value(var_ast, T.number)
+          if i == 1 then set_value(var_ast, type(key))
+          elseif i == 2 then set_value(var_ast, value)
           else set_value(var_ast, nil) end
         end
       else -- general case, unknown iterator
@@ -771,11 +790,12 @@ function M.infer_values(top_ast, tokenlist, src, report)
         -- Any call to require is handled specially (source analysis).
         if func == require and type(argvalues[1]) == 'string' then
           local spath = tostring(ast.lineinfo.first):gsub('<C|','<'):match('<([^|]+)') -- a HACK? relies on AST lineinfo
-          local val = M.require_inspect(argvalues[1], report, spath:gsub('[^\\/]+$', ''))
+          local val, mast = M.require_inspect(argvalues[1], report, spath:gsub('[^\\/]+$', ''))
           if known(val) and val ~= nil then
             ast.value = val
             found = true
           end -- note: on nil value, assumes analysis failed (not found). This is a heuristic only.
+          if mast and mast.valueglobals then ast.valueglobals = mast.valueglobals end
         end
         -- Attempt call if safe.
         if not found and (LS.safe_function[func] or func == pcall and LS.safe_function[argvalues[1]]) then
@@ -820,8 +840,7 @@ function M.infer_values(top_ast, tokenlist, src, report)
         local x
         local val = function() x=nil end
         local fpos = LA.ast_pos_range(ast, tokenlist)
-        local source = tostring(ast.lineinfo.first):gsub('<C|','<'):match('<([^|]+)') -- a HACK? relies on AST lineinfo
-        local linenum = LA.pos_to_linecol(fpos, src)
+        local source, linenum = tostring(ast.lineinfo.first):gsub('<C|','<'):match('<([^|]+)|L(%d+)') -- a HACK? relies on AST lineinfo
         local retvals
         if ENABLE_RETURN_ANALYSIS then
           retvals = get_func_return_values(ast) --Q:move outside of containing conditional?
@@ -1071,10 +1090,10 @@ function M.uninspect(top_ast)
     ast.note = nil
 
     ast.nocollect = nil
-  end)
 
-  -- undo infer_values
-  top_ast.valueglobals = nil
+    -- undo infer_values
+    ast.valueglobals = nil
+  end)
 end
 
 
@@ -1125,6 +1144,10 @@ function M.inspect(top_ast, tokenlist, src, report)
   end
 
   LA.walk(top_ast, function(ast)
+    if top_ast ~= ast and ast.valueglobals then
+      for k in pairs(ast.valueglobals) do globals[k] = {set = ast} end
+      ast.valueglobals = nil
+    end
     if ast.tag == 'Id' or ast.isfield then
       local vname = ast[1]
       --TODO: rename definedglobal to definedfield for clarity

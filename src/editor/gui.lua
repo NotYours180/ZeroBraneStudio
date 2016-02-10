@@ -1,4 +1,4 @@
--- Copyright 2011-14 Paul Kulchenko, ZeroBrane LLC
+-- Copyright 2011-15 Paul Kulchenko, ZeroBrane LLC
 -- authors: Luxinia Dev (Eike Decker & Christoph Kubisch)
 -- Lomtik Software (J. Winwood & John Labenski)
 ---------------------------------------------------------
@@ -30,7 +30,8 @@ end
 -- ----------------------------------------------------------------------------
 local function createFrame()
   local frame = wx.wxFrame(wx.NULL, wx.wxID_ANY, GetIDEString("editor"),
-    wx.wxDefaultPosition, wx.wxSize(1000, 700))
+    wx.wxDefaultPosition, wx.wxSize(1100, 700))
+  frame:Center()
   -- wrap into protected call as DragAcceptFiles fails on MacOS with
   -- wxwidgets 2.8.12 even though it should work according to change notes
   -- for 2.8.10: "Implemented wxWindow::DragAcceptFiles() on all platforms."
@@ -43,17 +44,38 @@ local function createFrame()
       end
     end)
 
+  -- update best size of the toolbar after resizing
+  frame:Connect(wx.wxEVT_SIZE, function(event)
+      local mgr = ide:GetUIManager()
+      local toolbar = mgr:GetPane("toolbar")
+      if toolbar and toolbar:IsOk() then
+        toolbar:BestSize(event:GetSize():GetWidth(), ide:GetToolBar():GetClientSize():GetHeight())
+        mgr:Update()
+      end
+    end)
+
   local menuBar = wx.wxMenuBar()
-  local statusBar = frame:CreateStatusBar(6)
+  local statusBar = frame:CreateStatusBar(5)
   local section_width = statusBar:GetTextExtent("OVRW")
-  statusBar:SetStatusStyles({wx.wxSB_FLAT, wx.wxSB_FLAT, wx.wxSB_FLAT,
-      wx.wxSB_FLAT, wx.wxSB_FLAT, wx.wxSB_FLAT})
-  statusBar:SetStatusWidths(
-    {-1, section_width*6, section_width, section_width, section_width*5, section_width*4})
+  statusBar:SetStatusStyles({wx.wxSB_FLAT, wx.wxSB_FLAT, wx.wxSB_FLAT, wx.wxSB_FLAT, wx.wxSB_FLAT})
+  statusBar:SetStatusWidths({-1, section_width, section_width, section_width*5, section_width*4})
   statusBar:SetStatusText(GetIDEString("statuswelcome"))
+  statusBar:Connect(wx.wxEVT_LEFT_DOWN, function (event)
+      local rect = wx.wxRect()
+      statusBar:GetFieldRect(4, rect)
+      if rect:Contains(event:GetPosition()) then -- click on the interpreter
+        local menuitem = ide:FindMenuItem(ID.INTERPRETER)
+        if menuitem then
+          local menu = ide:CloneMenu(menuitem:GetSubMenu())
+          if menu then statusBar:PopupMenu(menu) end
+        end
+      end
+    end)
 
   local mgr = wxaui.wxAuiManager()
   mgr:SetManagedWindow(frame)
+  -- allow the panes to be larger than the defalt 1/3 of the main window size
+  mgr:SetDockSizeConstraint(0.8,0.8)
 
   frame.menuBar = menuBar
   frame.statusBar = statusBar
@@ -74,8 +96,9 @@ local function menuDropDownPosition(event)
 end
 
 local function tbIconSize()
+  -- use large icons by default on OSX and on large screens
   local iconsize = (tonumber(ide.config.toolbar and ide.config.toolbar.iconsize)
-    or (ide.osname == 'Macintosh' and 24 or 16))
+    or ((ide.osname == 'Macintosh' or wx.wxGetClientDisplayRect():GetWidth() >= 1500) and 24 or 16))
   if iconsize ~= 24 then iconsize = 16 end
   return iconsize
 end
@@ -100,7 +123,7 @@ local function createToolBar(frame)
           local icon, description = unpack(iconmap)
           local isbitmap = type(icon) == "userdata" and icon:GetClassInfo():GetClassName() == "wxBitmap"
           local bitmap = isbitmap and icon or ide:GetBitmap(icon, "TOOLBAR", toolBmpSize)
-          toolBar:AddTool(id, "", bitmap, TR(description)..SCinB(id))
+          toolBar:AddTool(id, "", bitmap, (TR)(description)..SCinB(id))
         end
       end
       prev = id
@@ -201,6 +224,8 @@ local function createNotebook(frame)
           local editor = GetEditor(page)
           if editor then ide.openDocuments[editor:GetId()].index = page end
         end
+        -- first set the selection on the dragged tab to reset its state
+        notebook:SetSelection(event:GetSelection())
         -- select the content of the tab after drag is done
         SetEditorSelection(event:GetSelection())
         event:Skip()
@@ -236,48 +261,45 @@ local function createNotebook(frame)
       notebook:PopupMenu(menu)
     end)
 
-  local function IfAtLeastOneTab(event)
-    event:Enable(notebook:GetPageCount() > 0)
-    if ide.osname == 'Macintosh' and (event:GetId() == ID_CLOSEALL
-      or event:GetId() == ID_CLOSE and notebook:GetPageCount() <= 1)
-    then event:Enable(false) end
-  end
-  local function IfModified(event) event:Enable(EditorIsModified(GetEditor(selection))) end
+  local function IfAtLeastOneTab(event) event:Enable(notebook:GetPageCount() > 0) end
 
   notebook:Connect(ID_SAVE, wx.wxEVT_COMMAND_MENU_SELECTED, function ()
-      local editor = GetEditor(selection)
-      SaveFile(editor, ide.openDocuments[editor:GetId()].filePath)
+      ide:GetDocument(GetEditor(selection)):Save()
     end)
-  notebook:Connect(ID_SAVE, wx.wxEVT_UPDATE_UI, IfModified)
+  notebook:Connect(ID_SAVE, wx.wxEVT_UPDATE_UI, function(event)
+      local doc = ide:GetDocument(GetEditor(selection))
+      event:Enable(doc:IsModified() or doc:IsNew())
+    end)
   notebook:Connect(ID_SAVEAS, wx.wxEVT_COMMAND_MENU_SELECTED, function()
       SaveFileAs(GetEditor(selection))
     end)
   notebook:Connect(ID_SAVEAS, wx.wxEVT_UPDATE_UI, IfAtLeastOneTab)
+
+  -- the following three methods require handling of closing in the idle event,
+  -- because of wxwidgets issue that causes crash on OSX when the last page is closed
+  -- (http://trac.wxwidgets.org/ticket/15417)
   notebook:Connect(ID_CLOSE, wx.wxEVT_COMMAND_MENU_SELECTED, function()
-      ClosePage(selection)
+      ide:DoWhenIdle(function() ClosePage(selection) end)
+    end)
+  notebook:Connect(ID_CLOSEALL, wx.wxEVT_COMMAND_MENU_SELECTED, function()
+      ide:DoWhenIdle(function() CloseAllPagesExcept(nil) end)
+    end)
+  notebook:Connect(ID_CLOSEOTHER, wx.wxEVT_COMMAND_MENU_SELECTED, function ()
+      ide:DoWhenIdle(function() CloseAllPagesExcept(selection) end)
     end)
   notebook:Connect(ID_CLOSE, wx.wxEVT_UPDATE_UI, IfAtLeastOneTab)
-  notebook:Connect(ID_CLOSEALL, wx.wxEVT_COMMAND_MENU_SELECTED, function()
-      CloseAllPagesExcept(nil)
-    end)
   notebook:Connect(ID_CLOSEALL, wx.wxEVT_UPDATE_UI, IfAtLeastOneTab)
-  notebook:Connect(ID_CLOSEOTHER, wx.wxEVT_COMMAND_MENU_SELECTED, function ()
-      CloseAllPagesExcept(selection)
-    end)
   notebook:Connect(ID_CLOSEOTHER, wx.wxEVT_UPDATE_UI, function (event)
       event:Enable(notebook:GetPageCount() > 1)
     end)
+
   notebook:Connect(ID_SHOWLOCATION, wx.wxEVT_COMMAND_MENU_SELECTED, function()
       ShowLocation(ide:GetDocument(GetEditor(selection)):GetFilePath())
     end)
   notebook:Connect(ID_SHOWLOCATION, wx.wxEVT_UPDATE_UI, IfAtLeastOneTab)
 
   notebook:Connect(ID_COPYFULLPATH, wx.wxEVT_COMMAND_MENU_SELECTED, function()
-      local tdo = wx.wxTextDataObject(ide:GetDocument(GetEditor(selection)):GetFilePath())
-      if wx.wxClipboard:Get():Open() then
-        wx.wxClipboard:Get():SetData(tdo)
-        wx.wxClipboard:Get():Close()
-      end
+      ide:CopyToClipboard(ide:GetDocument(GetEditor(selection)):GetFilePath())
     end)
 
   frame.notebook = notebook
@@ -297,6 +319,7 @@ local function addDND(notebook)
         if winid == ide:GetOutput():GetId()
         or winid == ide:GetConsole():GetId()
         or winid == ide:GetProjectTree():GetId()
+        or ide.findReplace:IsPreview(win) -- search results preview
         then return end
 
         local mgr = ide.frame.uimgr
@@ -390,17 +413,37 @@ local function createBottomNotebook(frame)
 
   addDND(bottomnotebook)
 
+  bottomnotebook:Connect(wxaui.wxEVT_COMMAND_AUINOTEBOOK_PAGE_CHANGED,
+    function (event)
+      if not ide.findReplace then return end
+      local nb = event:GetEventObject():DynamicCast("wxAuiNotebook")
+      local preview = ide.findReplace:IsPreview(nb:GetPage(nb:GetSelection()))
+      local flags = nb:GetWindowStyleFlag()
+      if preview and bit.band(flags, wxaui.wxAUI_NB_CLOSE_ON_ACTIVE_TAB) == 0 then
+        nb:SetWindowStyleFlag(flags + wxaui.wxAUI_NB_CLOSE_ON_ACTIVE_TAB)
+      elseif not preview and bit.band(flags, wxaui.wxAUI_NB_CLOSE_ON_ACTIVE_TAB) ~= 0 then
+        nb:SetWindowStyleFlag(flags - wxaui.wxAUI_NB_CLOSE_ON_ACTIVE_TAB)
+      end
+    end)
+
   -- disallow tabs closing
   bottomnotebook:Connect(wxaui.wxEVT_COMMAND_AUINOTEBOOK_PAGE_CLOSE,
-    function (event) event:Veto() end)
+    function (event)
+      local nb = event:GetEventObject():DynamicCast("wxAuiNotebook")
+      if ide.findReplace
+      and ide.findReplace:IsPreview(nb:GetPage(nb:GetSelection())) then
+        event:Skip()
+      else
+        event:Veto()
+      end
+    end)
 
   local errorlog = ide:CreateStyledTextCtrl(bottomnotebook, wx.wxID_ANY,
     wx.wxDefaultPosition, wx.wxDefaultSize, wx.wxBORDER_NONE)
 
   errorlog:Connect(wx.wxEVT_CONTEXT_MENU,
     function (event)
-      errorlog:PopupMenu(
-        wx.wxMenu {
+      local menu = wx.wxMenu {
           { ID_UNDO, TR("&Undo") },
           { ID_REDO, TR("&Redo") },
           { },
@@ -411,7 +454,8 @@ local function createBottomNotebook(frame)
           { },
           { ID_CLEAROUTPUT, TR("C&lear Output Window") },
         }
-      )
+      PackageEventHandle("onMenuOutput", menu, errorlog, event)
+      errorlog:PopupMenu(menu)
     end)
 
   errorlog:Connect(ID_CLEAROUTPUT, wx.wxEVT_COMMAND_MENU_SELECTED,
@@ -419,6 +463,31 @@ local function createBottomNotebook(frame)
 
   local shellbox = ide:CreateStyledTextCtrl(bottomnotebook, wx.wxID_ANY,
     wx.wxDefaultPosition, wx.wxDefaultSize, wx.wxBORDER_NONE)
+
+  local menupos
+  shellbox:Connect(wx.wxEVT_CONTEXT_MENU,
+    function (event)
+      local menu = wx.wxMenu {
+          { ID_UNDO, TR("&Undo") },
+          { ID_REDO, TR("&Redo") },
+          { },
+          { ID_CUT, TR("Cu&t") },
+          { ID_COPY, TR("&Copy") },
+          { ID_PASTE, TR("&Paste") },
+          { ID_SELECTALL, TR("Select &All") },
+          { },
+          { ID_SELECTCONSOLECOMMAND, TR("&Select Command") },
+          { ID_CLEARCONSOLE, TR("C&lear Console Window") },
+        }
+      menupos = event:GetPosition()
+      PackageEventHandle("onMenuConsole", menu, shellbox, event)
+      shellbox:PopupMenu(menu)
+    end)
+
+  shellbox:Connect(ID_SELECTCONSOLECOMMAND, wx.wxEVT_COMMAND_MENU_SELECTED,
+    function(event) ConsoleSelectCommand(menupos) end)
+  shellbox:Connect(ID_CLEARCONSOLE, wx.wxEVT_COMMAND_MENU_SELECTED,
+    function(event) ide:GetConsole():Erase() end)
 
   bottomnotebook:AddPage(errorlog, TR("Output"), true)
   bottomnotebook:AddPage(shellbox, TR("Local console"), false)

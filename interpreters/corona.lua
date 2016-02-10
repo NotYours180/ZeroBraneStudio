@@ -1,6 +1,6 @@
 -- Copyright 2011-13 Paul Kulchenko, ZeroBrane LLC
 
-local corona
+local pathcache
 local win = ide.osname == "Windows"
 local mac = ide.osname == "Macintosh"
 
@@ -9,7 +9,7 @@ return {
   description = "Corona SDK mobile framework",
   api = {"baselib", "corona"},
   frun = function(self,wfilename,rundebug)
-    corona = corona or ide.config.path.corona -- check if the path is configured
+    local corona = ide.config.path.corona or pathcache -- check if the path is configured
     if not corona then
       local sep = win and ';' or ':'
       local default =
@@ -26,15 +26,17 @@ return {
         table.insert(paths, p)
       end
       if not corona then
-        DisplayOutput("Can't find corona executable in any of the folders in PATH: "
-          ..table.concat(paths, ", ").."\n")
+        DisplayOutputLn("Can't find corona executable in any of the folders in PATH: "
+          ..table.concat(paths, ", "))
         return
       end
+      pathcache = corona
     end
 
     local file = GetFullPathIfExists(self:fworkdir(wfilename), 'main.lua')
     if not file then
-      DisplayOutput("Can't find 'main.lua' file in the current project folder.\n")
+      DisplayOutputLn(("Can't find 'main.lua' file in the current project folder: '%s'.")
+        :format(self:fworkdir(wfilename)))
       return
     end
 
@@ -81,9 +83,9 @@ return {
 
     local cfg = ide.config.corona or {}
     local debugopt = mac and "-debug 1 -project " or "-debug "
-    local skin = cfg.skin and (" -skin "..ide.config.corona.skin) or ""
+    local skin = cfg.skin and (" -skin "..cfg.skin) or ""
     local noconsole = (cfg.showconsole and ""
-      or (win and "-no-console " or "-no-console YES "))
+      or (mac and "-no-console YES " or "-no-console "))
     local cmd = ('"%s" %s%s"%s"%s')
       :format(corona, noconsole, rundebug and debugopt or "", file, skin)
 
